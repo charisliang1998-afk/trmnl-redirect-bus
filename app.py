@@ -1,21 +1,19 @@
-# ==== CONFIG ===============================================================
-# You can paste EITHER:
-#  - the full Apps Script /exec URL, e.g. "https://script.google.com/macros/s/AKfycb.../exec"
-#  - OR just the Deployment ID, e.g. "AKfycb..."
-# You can also set this as an env var named GAS_DEPLOYMENT in Render.
+# ============================== app.py ======================================
+# CONFIG — set your Apps Script URL or Deployment ID here (or via env GAS_DEPLOYMENT)
 GAS_DEPLOYMENT = "https://script.google.com/macros/s/AKfycbyJwiSxqW-AjsTxrqNFCZA_0tp8bwqAjRDOXai0a9fcAiEhi3QV8_LGbQRtR_X7QYsR/exec"
 
-# Default bus stops (can be overridden via query string)
+# Default bus stops (overridable via query string)
 DEFAULT_A, DEFAULT_B, DEFAULT_C = "45379", "45489", "45371"
-# ==========================================================================
 
+# ----------------------------------------------------------------------------
 from flask import Flask, request, jsonify, send_file
 import os, io, time, requests
+from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 
-# ---- GAS helpers ----------------------------------------------------------
+# ---------- Google Apps Script helpers --------------------------------------
 def gas_base_url():
     # Prefer env var if set in Render dashboard
     val = (os.getenv("GAS_DEPLOYMENT") or GAS_DEPLOYMENT or "").strip()
@@ -30,7 +28,11 @@ def fetch_bus(stopa, stopb, stopc, timeout_sec=5):
     if not url:
         return _empty_payload(stopa, stopb, stopc)
     try:
-        r = requests.get(url, params={"stop_a": stopa, "stop_b": stopb, "stop_c": stopc}, timeout=timeout_sec)
+        r = requests.get(
+            url,
+            params={"stop_a": stopa, "stop_b": stopb, "stop_c": stopc},
+            timeout=timeout_sec
+        )
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -44,44 +46,56 @@ def _empty_payload(a, b, c):
         "stop_c": {"name": f"{c}", "code": c, "services": []},
     }
 
-import os, io
-from datetime import datetime, timezone, timedelta
-from PIL import Image, ImageDraw, ImageFont
+# ---------- Canvas & Layout base constants ----------------------------------
+W, H = 800, 480
+PAD_L, PAD_R, PAD_T, PAD_B = 20, 20, 22, 16
+STAMP_PAD_TOP = 20
 
-# Canvas & layout
-# --- VISUAL TUNING (bigger timings, smaller titles/routes, more spacing) ---
-STAMP_SIZE = 12     # "Updated HH:MM" (slightly smaller)
+# ---------- Visual tuning (bigger timings, more breathing space) ------------
+STAMP_SIZE = 12     # "Updated HH:MM"
 NAME_SIZE  = 28     # stop names (smaller)
 SVC_SIZE   = 24     # route numbers (smaller)
 TIME_SIZE  = 30     # arrival lines (bigger)
 
 COL_GAP       = 32  # more gap between A and B columns
-SVC_COL       = 125 # route column width (was ~140). Smaller -> more room for times
+SVC_COL       = 125 # route number column width
 LINE_GAP      = 8   # gap between the 3 vertical time lines
 EXTRA_ROW_PAD = 12  # extra space under each route row
 TITLE_GAP     = 8   # gap under stop titles
 
-# Paths to your local Inter variable fonts (added to repo under fonts/)
+# ---------- Fonts (local Inter variable; fallback to default) ----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INTER_VAR_PATH = os.path.join(BASE_DIR, "fonts", "Inter-VariableFont_opsz,wght.ttf")
-INTER_VAR_ITALIC_PATH = os.path.join(BASE_DIR, "fonts", "Inter-Italic-VariableFont_opsz,wght.ttf")  # unused
+# Inter-Italic available but unused:
+# INTER_VAR_ITALIC_PATH = os.path.join(BASE_DIR, "fonts", "Inter-Italic-VariableFont_opsz,wght.ttf")
 
 def _load_fonts():
-    """
-    Load Inter variable font locally from repo. If missing, fall back to Pillow default.
-    For 'bold', we simulate weight via stroke on draw().
-    """
+    """Load Inter variable font locally. Fallback to Pillow default."""
     try:
         f_name  = ImageFont.truetype(INTER_VAR_PATH, NAME_SIZE)
         f_svc   = ImageFont.truetype(INTER_VAR_PATH, SVC_SIZE)
         f_time  = ImageFont.truetype(INTER_VAR_PATH, TIME_SIZE)
         f_stamp = ImageFont.truetype(INTER_VAR_PATH, STAMP_SIZE)
-        return f_name, f_svc, f_time, f_stamp, True  # True = using Inter
+        return f_name, f_svc, f_time, f_stamp, True
     except Exception as e:
         print("FONT WARNING (using default):", repr(e))
         f = ImageFont.load_default()
         return f, f, f, f, False
 
+def _load_fonts_sizes(name_sz, svc_sz, time_sz, stamp_sz):
+    """Load Inter at specific sizes for auto-fit; fallback to default."""
+    try:
+        f_name  = ImageFont.truetype(INTER_VAR_PATH, name_sz)
+        f_svc   = ImageFont.truetype(INTER_VAR_PATH, svc_sz)
+        f_time  = ImageFont.truetype(INTER_VAR_PATH, time_sz)
+        f_stamp = ImageFont.truetype(INTER_VAR_PATH, stamp_sz)
+        return f_name, f_svc, f_time, f_stamp, True
+    except Exception as e:
+        print("FONT WARNING (dynamic sizes):", repr(e))
+        f = ImageFont.load_default()
+        return f, f, f, f, False
+
+# ---------- Text helpers -----------------------------------------------------
 def _line_h(draw, font):
     l, t, r, b = draw.textbbox((0, 0), "Hg", font=font)
     return b - t
@@ -101,29 +115,13 @@ def _wrap(draw, text, font, max_w):
     return lines
 
 def _draw_text(d, x, y, s, font, *, bold=False):
-    """
-    Draw text; if bold=True, simulate bold with a 1px stroke (works well in 1-bit).
-    """
+    """If bold=True, simulate bold via a 1px stroke (works well in 1-bit)."""
     if bold:
         d.text((x, y), s, 0, font=font, stroke_width=1, stroke_fill=0)
     else:
         d.text((x, y), s, 0, font=font)
 
-def _load_fonts_sizes(name_sz, svc_sz, time_sz, stamp_sz):
-    """
-    Load Inter (local variable TTF) at the given sizes; fall back to Pillow default if needed.
-    """
-    try:
-        f_name  = ImageFont.truetype(INTER_VAR_PATH, name_sz)
-        f_svc   = ImageFont.truetype(INTER_VAR_PATH, svc_sz)
-        f_time  = ImageFont.truetype(INTER_VAR_PATH, time_sz)
-        f_stamp = ImageFont.truetype(INTER_VAR_PATH, stamp_sz)
-        return f_name, f_svc, f_time, f_stamp, True
-    except Exception as e:
-        print("FONT WARNING (dynamic sizes):", repr(e))
-        f = ImageFont.load_default()
-        return f, f, f, f, False
-        
+# ---------- Image renderer (auto-fit) ---------------------------------------
 def draw_image(data):
     """
     800x480, 1-bit PNG with Inter + auto-fit:
@@ -133,7 +131,6 @@ def draw_image(data):
       - SGT 'Updated HH:MM' top-right
       - Auto-scales down slightly if content would overflow
     """
-    from datetime import datetime, timezone, timedelta
     img = Image.new("L", (W, H), 255)
     d   = ImageDraw.Draw(img)
 
@@ -279,45 +276,7 @@ def draw_image(data):
     buf.seek(0)
     return buf
 
-# ===========================================================================
-
-# Optional: quick diag endpoint to confirm fonts are present
-@app.get("/version")
-def version():
-    return {
-        "inter_var_present": os.path.exists(INTER_VAR_PATH),
-        "stamp_size": STAMP_SIZE, "name_size": NAME_SIZE,
-        "svc_size": SVC_SIZE, "time_size": TIME_SIZE,
-        "svc_col": SVC_COL
-    }, 200
-    
-# ===========================================================================
-
-# --- tiny diagnostics so you can confirm it's active ------------------------
-# Optional: quick diag endpoint to confirm fonts are present
-@app.get("/fontinfo")
-def fontinfo():
-    import os
-    return {
-        "inter_var_present": os.path.exists(INTER_VAR_PATH),
-        "font_path": INTER_VAR_PATH,
-        "stamp_size": STAMP_SIZE, "name_size": NAME_SIZE,
-        "svc_size": SVC_SIZE, "time_size": TIME_SIZE,
-        "svc_col": SVC_COL
-    }, 200
-
-@app.get("/fontsample.png")
-def fontsample():
-    img = Image.new("L", (800, 120), 255)
-    d   = ImageDraw.Draw(img)
-    f_name, f_svc, f_time, f_stamp = _load_fonts()
-    d.text((10, 10),  "Stop Name (Bold) — Inter", 0, font=f_name)
-    d.text((10, 50),  "307 | 15:32 (6m) • 15:48 (22m) • 16:03 (37m)", 0, font=f_time)
-    d.text((10, 90),  "Updated 12:34", 0, font=f_stamp)
-    out = io.BytesIO(); img.convert("1").save(out, "PNG"); out.seek(0)
-    return send_file(out, mimetype="image/png")
-    
-# ---- Routes ---------------------------------------------------------------
+# ----------------------------- Routes ---------------------------------------
 @app.get("/")
 def home():
     return "OK", 200
@@ -365,30 +324,45 @@ def image_png():
     png = draw_image(data)
     return send_file(png, mimetype="image/png")
 
+# Redirect JSON for TRMNL Redirect plugin
 @app.get("/redirect")
 def redirect_json():
     try:
-        # minute-rolling filename in Singapore time
-        from datetime import datetime, timezone, timedelta
         sgt = timezone(timedelta(hours=8))
-        tick = datetime.now(sgt).strftime("%Y%m%d%H%M")
-
-        # stops (fall back to your defaults if not supplied)
+        tick = datetime.now(sgt).strftime("%Y%m%d%H%M")  # changes each minute
         a = (request.args.get("stop_a") or DEFAULT_A).strip()
         b = (request.args.get("stop_b") or DEFAULT_B).strip()
         c = (request.args.get("stop_c") or DEFAULT_C).strip()
-
-        # absolute image URL (no url_for needed)
         root = request.url_root.rstrip("/")
         img_url = f"{root}/image.png?stop_a={a}&stop_b={b}&stop_c={c}&t={tick}"
-
-        return jsonify({
-            "filename": f"bus-{tick}",
-            "url": img_url,
-            "refresh_rate": 60
-        }), 200
+        return jsonify({"filename": f"bus-{tick}", "url": img_url, "refresh_rate": 60}), 200
     except Exception as e:
-        # helpful log and safe JSON
         print("redirect error:", repr(e))
         return jsonify({"error": "redirect-failed", "detail": str(e)}), 500
 
+# Optional diagnostics
+@app.get("/fontinfo")
+def fontinfo():
+    return {
+        "inter_var_present": os.path.exists(INTER_VAR_PATH),
+        "font_path": INTER_VAR_PATH,
+        "stamp_size": STAMP_SIZE, "name_size": NAME_SIZE,
+        "svc_size": SVC_SIZE, "time_size": TIME_SIZE,
+        "svc_col": SVC_COL
+    }, 200
+
+@app.get("/fontsample.png")
+def fontsample():
+    img = Image.new("L", (800, 120), 255)
+    d   = ImageDraw.Draw(img)
+    f_name, f_svc, f_time, f_stamp, _ = _load_fonts()
+    d.text((10, 10),  "Stop Name (Bold) — Inter", 0, font=f_name, stroke_width=1, stroke_fill=0)
+    d.text((10, 50),  "307 | 15:32 (6m) • 15:48 (22m) • 16:03 (37m)", 0, font=f_time)
+    d.text((10, 90),  "Updated 12:34", 0, font=f_stamp)
+    out = io.BytesIO(); img.convert("1").save(out, "PNG"); out.seek(0)
+    return send_file(out, mimetype="image/png")
+
+# Local run (ignored by Render’s gunicorn)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+# ============================================================================
