@@ -1,4 +1,4 @@
-name: TRMNL Keepalive
+name: TRMNL Keepalive 
 
 on:
   schedule:
