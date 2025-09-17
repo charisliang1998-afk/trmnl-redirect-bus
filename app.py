@@ -44,99 +44,53 @@ def _empty_payload(a, b, c):
         "stop_c": {"name": f"{c}", "code": c, "services": []},
     }
 
-# ======= FONTS + CLEAN LAYOUT (Inter auto-download) ========================
-import os, io, requests
+Paste this block replacing your current font helpers and draw_image(...). It uses the local fonts/Inter-VariableFont_opsz,wght.ttf, fixes SG time, wraps long stop names, prevents overlap, and keeps the private-plugin layout. No network calls.
+
+# ======= LOCAL INTER VARIABLE FONT + CLEAN LAYOUT (no outbound) ============
+import os, io
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
-
-APP_BUILD = "inter-v2"
 
 # Canvas & layout
 W, H                          = 800, 480
 PAD_L, PAD_R, PAD_T, PAD_B    = 20, 20, 22, 16
 STAMP_PAD_TOP                 = 20
 COL_GAP, ROW_GAP              = 24, 14
-SVC_COL                       = 140     # route-number column width
+SVC_COL                       = 140     # route-number column (bump to 150 if needed)
 LINE_GAP                      = 6
 
-# Sizes tuned for 800x480
+# Font sizes tuned for 800x480
 STAMP_SIZE = 13               # "Updated HH:MM"
-NAME_SIZE  = 34               # stop names (Bold)
-SVC_SIZE   = 32               # route numbers (Bold)
-TIME_SIZE  = 26               # vertical times (Regular)
+NAME_SIZE  = 34               # stop names (bolded)
+SVC_SIZE   = 32               # route numbers (bolded)
+TIME_SIZE  = 26               # vertical time lines (regular)
 
-# --- font storage (no repo upload needed) ----------------------------------
-TMP_DIR = "/tmp/fonts"; os.makedirs(TMP_DIR, exist_ok=True)
-REG_PATH  = os.path.join(TMP_DIR, "Inter-Regular.ttf")
-BOLD_PATH = os.path.join(TMP_DIR, "Inter-Bold.ttf")
-DJV_REG   = os.path.join(TMP_DIR, "DejaVuSans.ttf")
-DJV_BOLD  = os.path.join(TMP_DIR, "DejaVuSans-Bold.ttf")
-
-INTER_REG_SOURCES = [
-    os.getenv("FONT_URL_REG") or "",
-    "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/inter/static/Inter-Regular.ttf",
-    "https://raw.githubusercontent.com/google/fonts/main/ofl/inter/static/Inter-Regular.ttf",
-]
-INTER_BOLD_SOURCES = [
-    os.getenv("FONT_URL_BOLD") or "",
-    "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/inter/static/Inter-Bold.ttf",
-    "https://raw.githubusercontent.com/google/fonts/main/ofl/inter/static/Inter-Bold.ttf",
-]
-DEJAVU_REG_SRC = "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans.ttf"
-DEJAVU_BOLD_SRC= "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans-Bold.ttf"
-
-def _download(url: str, dest: str):
-    r = requests.get(url, timeout=20, allow_redirects=True)
-    r.raise_for_status()
-    with open(dest, "wb") as f: f.write(r.content)
-    return True
-
-def _ensure_one(path: str, sources: list):
-    if os.path.exists(path) and os.path.getsize(path) > 0:
-        return True, "cached"
-    for u in sources:
-        if not u: continue
-        try:
-            _download(u, path)
-            return True, u
-        except Exception:
-            continue
-    return False, "unavailable"
-
-def _ensure_fonts():
-    ok1, src1 = _ensure_one(REG_PATH,  INTER_REG_SOURCES)
-    ok2, src2 = _ensure_one(BOLD_PATH, INTER_BOLD_SOURCES)
-    # If Inter failed, fall back to DejaVu
-    if not (ok1 and ok2):
-        _ensure_one(DJV_REG,  [DEJAVU_REG_SRC])
-        _ensure_one(DJV_BOLD, [DEJAVU_BOLD_SRC])
+# Paths to your local Inter variable fonts (added to repo under fonts/)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INTER_VAR_PATH = os.path.join(BASE_DIR, "fonts", "Inter-VariableFont_opsz,wght.ttf")
+INTER_VAR_ITALIC_PATH = os.path.join(BASE_DIR, "fonts", "Inter-Italic-VariableFont_opsz,wght.ttf")  # unused
 
 def _load_fonts():
+    """
+    Load Inter variable font locally from repo. If missing, fall back to Pillow default.
+    For 'bold', we simulate weight via stroke on draw().
+    """
     try:
-        _ensure_fonts()
-        if os.path.exists(REG_PATH) and os.path.exists(BOLD_PATH):
-            f_name  = ImageFont.truetype(BOLD_PATH, NAME_SIZE)
-            f_svc   = ImageFont.truetype(BOLD_PATH, SVC_SIZE)
-            f_time  = ImageFont.truetype(REG_PATH,  TIME_SIZE)
-            f_stamp = ImageFont.truetype(REG_PATH,  STAMP_SIZE)
-        elif os.path.exists(DJV_REG) and os.path.exists(DJV_BOLD):
-            f_name  = ImageFont.truetype(DJV_BOLD, NAME_SIZE)
-            f_svc   = ImageFont.truetype(DJV_BOLD, SVC_SIZE)
-            f_time  = ImageFont.truetype(DJV_REG,  TIME_SIZE)
-            f_stamp = ImageFont.truetype(DJV_REG,  STAMP_SIZE)
-        else:
-            raise RuntimeError("TTF fonts not available")
-        return f_name, f_svc, f_time, f_stamp
+        f_name  = ImageFont.truetype(INTER_VAR_PATH, NAME_SIZE)
+        f_svc   = ImageFont.truetype(INTER_VAR_PATH, SVC_SIZE)
+        f_time  = ImageFont.truetype(INTER_VAR_PATH, TIME_SIZE)
+        f_stamp = ImageFont.truetype(INTER_VAR_PATH, STAMP_SIZE)
+        return f_name, f_svc, f_time, f_stamp, True  # True = using Inter
     except Exception as e:
-        print("FONT FALLBACK:", repr(e))
+        print("FONT WARNING (using default):", repr(e))
         f = ImageFont.load_default()
-        return f, f, f, f
+        return f, f, f, f, False
 
 def _line_h(draw, font):
     l, t, r, b = draw.textbbox((0, 0), "Hg", font=font)
     return b - t
 
-def _wrap_lines(draw, text, font, max_w):
+def _wrap(draw, text, font, max_w):
     words = (text or "").split()
     if not words: return []
     lines, cur = [], ""
@@ -150,78 +104,87 @@ def _wrap_lines(draw, text, font, max_w):
     if cur: lines.append(cur)
     return lines
 
-# preload once at import (so first image request isn’t slowed by font fetch)
-try:
-    _ensure_fonts()
-except Exception as _e:
-    print("Preload fonts warning:", repr(_e))
+def _draw_text(d, x, y, s, font, *, bold=False):
+    """
+    Draw text; if bold=True, simulate bold with a 1px stroke (keeps good legibility in 1-bit).
+    """
+    if bold:
+        d.text((x, y), s, 0, font=font, stroke_width=1, stroke_fill=0)
+    else:
+        d.text((x, y), s, 0, font=font)
 
 def draw_image(data):
-    """800x480, 1-bit PNG with Inter/DejaVu, SGT timestamp, wrapped names, no overlap."""
+    """
+    800x480, 1-bit PNG:
+      - A (left) + B (right) on top
+      - C spans full width below taller of A/B (two inner columns)
+      - Inter variable font from repo, faux-bold for names/routes
+      - SGT 'Updated HH:MM' at top-right
+      - Wrapped titles; fixed route column; 3 vertical time lines
+    """
     img = Image.new("L", (W, H), 255)
     d   = ImageDraw.Draw(img)
-    f_name, f_svc, f_time, f_stamp = _load_fonts()
+    f_name, f_svc, f_time, f_stamp, have_inter = _load_fonts()
 
-    def text(x, y, s, f): d.text((x, y), s, 0, font=f)
-
-    # 1) Top-right stamp (Singapore time)
+    # 1) Top-right 'Updated' in Singapore time
     sgt = timezone(timedelta(hours=8))
     now_hm = datetime.now(sgt).strftime("%H:%M")
     stamp  = f"Updated {now_hm}"
     stamp_h = _line_h(d, f_stamp)
     tx = W - PAD_R - d.textlength(stamp, font=f_stamp)
     ty = PAD_T
-    text(tx, ty, stamp, f_stamp)
+    _draw_text(d, tx, ty, stamp, f_stamp, bold=False)
 
     grid_y = PAD_T + STAMP_PAD_TOP + stamp_h
 
-    # 2) Two columns (A left, B right)
+    # 2) Columns A (left) and B (right)
     col_w = (W - PAD_L - PAD_R - COL_GAP) // 2
     A_x, A_y = PAD_L, grid_y
     B_x, B_y = PAD_L + col_w + COL_GAP, grid_y
 
-    # Draw a stop block and return bottom y
     def draw_stop_block(stop_obj, x0, y0, max_services=3, name_w=col_w):
         name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
-        lines = _wrap_lines(d, name, f_name, name_w)
+        lines = _wrap(d, name, f_name, name_w)
         lh_name = _line_h(d, f_name)
         ny = y0
         for ln in lines:
-            text(x0, ny, ln, f_name)
+            _draw_text(d, x0, ny, ln, f_name, bold=True)   # faux-bold for title
             ny += lh_name
-        ny += 6  # gap under name
+        ny += 6
 
         lh_time = _line_h(d, f_time)
         row_adv = 3*lh_time + 2*LINE_GAP + 8
 
         services = (stop_obj or {}).get("services") or []
         for s in services[:max_services]:
-            text(x0, ny, str(s.get("no","?")), f_svc)  # route (bold)
+            # route number (bold)
+            _draw_text(d, x0, ny, str(s.get("no","?")), f_svc, bold=True)
+            # three vertical times (regular)
             times_x = x0 + SVC_COL
             t1 = f"{s.get('time1','--:--')} ({s.get('min1','—')}m)"
             t2 = f"{s.get('time2','--:--')} ({s.get('min2','—')}m)"
             t3 = f"{s.get('time3','--:--')} ({s.get('min3','—')}m)"
-            text(times_x, ny + 0*(lh_time + LINE_GAP), t1, f_time)
-            text(times_x, ny + 1*(lh_time + LINE_GAP), t2, f_time)
-            text(times_x, ny + 2*(lh_time + LINE_GAP), t3, f_time)
+            _draw_text(d, times_x, ny + 0*(lh_time + LINE_GAP), t1, f_time)
+            _draw_text(d, times_x, ny + 1*(lh_time + LINE_GAP), t2, f_time)
+            _draw_text(d, times_x, ny + 2*(lh_time + LINE_GAP), t3, f_time)
             ny += row_adv
         return ny
 
     bottom_A = draw_stop_block(data.get("stop_a"), A_x, A_y, max_services=3, name_w=col_w)
     bottom_B = draw_stop_block(data.get("stop_b"), B_x, B_y, max_services=3, name_w=col_w)
 
-    # 3) Stop C below the taller of A/B; show first two routes side-by-side
+    # 3) Stop C below the taller of A/B; two inner columns (first two routes)
     C_x = PAD_L
     C_y = max(bottom_A, bottom_B) + 12
     C_w = W - PAD_L - PAD_R
 
     stop_c = data.get("stop_c") or {}
     name_c = stop_c.get("name") or stop_c.get("code") or ""
-    c_lines = _wrap_lines(d, name_c, f_name, C_w)
+    c_lines = _wrap(d, name_c, f_name, C_w)
     lh_name = _line_h(d, f_name)
     ny = C_y
     for ln in c_lines:
-        text(C_x, ny, ln, f_name)
+        _draw_text(d, C_x, ny, ln, f_name, bold=True)
         ny += lh_name
     ny += 6
 
@@ -231,14 +194,14 @@ def draw_image(data):
     lh_time   = _line_h(d, f_time)
 
     def draw_service(svc, x0, y0):
-        text(x0, y0, str(svc.get("no","?")), f_svc)
+        _draw_text(d, x0, y0, str(svc.get("no","?")), f_svc, bold=True)
         times_x = x0 + SVC_COL
         t1 = f"{svc.get('time1','--:--')} ({svc.get('min1','—')}m)"
         t2 = f"{svc.get('time2','--:--')} ({svc.get('min2','—')}m)"
         t3 = f"{svc.get('time3','--:--')} ({svc.get('min3','—')}m)"
-        text(times_x, y0 + 0*(lh_time + LINE_GAP), t1, f_time)
-        text(times_x, y0 + 1*(lh_time + LINE_GAP), t2, f_time)
-        text(times_x, y0 + 2*(lh_time + LINE_GAP), t3, f_time)
+        _draw_text(d, times_x, y0 + 0*(lh_time + LINE_GAP), t1, f_time)
+        _draw_text(d, times_x, y0 + 1*(lh_time + LINE_GAP), t2, f_time)
+        _draw_text(d, times_x, y0 + 2*(lh_time + LINE_GAP), t3, f_time)
 
     if len(servicesC) >= 1:
         draw_service(servicesC[0], C_x, ny)
@@ -251,6 +214,18 @@ def draw_image(data):
     img1.save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf
+# ===========================================================================
+
+# Optional: quick diag endpoint to confirm fonts are present
+@app.get("/version")
+def version():
+    return {
+        "inter_var_present": os.path.exists(INTER_VAR_PATH),
+        "stamp_size": STAMP_SIZE, "name_size": NAME_SIZE,
+        "svc_size": SVC_SIZE, "time_size": TIME_SIZE,
+        "svc_col": SVC_COL
+    }, 200
+    
 # ===========================================================================
 
 # --- tiny diagnostics so you can confirm it's active ------------------------
