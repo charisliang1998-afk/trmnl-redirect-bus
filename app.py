@@ -227,17 +227,16 @@ def version():
 # ===========================================================================
 
 # --- tiny diagnostics so you can confirm it's active ------------------------
-@app.get("/version")
-def version():
-    def size(p): 
-        try: return os.path.getsize(p)
-        except: return 0
+# Optional: quick diag endpoint to confirm fonts are present
+@app.get("/fontinfo")
+def fontinfo():
+    import os
     return {
-        "build": APP_BUILD,
-        "inter_regular": os.path.exists(REG_PATH), "inter_regular_bytes": size(REG_PATH),
-        "inter_bold":    os.path.exists(BOLD_PATH), "inter_bold_bytes": size(BOLD_PATH),
-        "dejavu_regular":os.path.exists(DJV_REG),  "dejavu_regular_bytes": size(DJV_REG),
-        "dejavu_bold":   os.path.exists(DJV_BOLD), "dejavu_bold_bytes": size(DJV_BOLD),
+        "inter_var_present": os.path.exists(INTER_VAR_PATH),
+        "font_path": INTER_VAR_PATH,
+        "stamp_size": STAMP_SIZE, "name_size": NAME_SIZE,
+        "svc_size": SVC_SIZE, "time_size": TIME_SIZE,
+        "svc_col": SVC_COL
     }, 200
 
 @app.get("/fontsample.png")
