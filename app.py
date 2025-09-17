@@ -44,9 +44,6 @@ def _empty_payload(a, b, c):
         "stop_c": {"name": f"{c}", "code": c, "services": []},
     }
 
-Paste this block replacing your current font helpers and draw_image(...). It uses the local fonts/Inter-VariableFont_opsz,wght.ttf, fixes SG time, wraps long stop names, prevents overlap, and keeps the private-plugin layout. No network calls.
-
-# ======= LOCAL INTER VARIABLE FONT + CLEAN LAYOUT (no outbound) ============
 import os, io
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
@@ -106,7 +103,7 @@ def _wrap(draw, text, font, max_w):
 
 def _draw_text(d, x, y, s, font, *, bold=False):
     """
-    Draw text; if bold=True, simulate bold with a 1px stroke (keeps good legibility in 1-bit).
+    Draw text; if bold=True, simulate bold with a 1px stroke (works well in 1-bit).
     """
     if bold:
         d.text((x, y), s, 0, font=font, stroke_width=1, stroke_fill=0)
@@ -214,6 +211,7 @@ def draw_image(data):
     img1.save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf
+
 # ===========================================================================
 
 # Optional: quick diag endpoint to confirm fonts are present
