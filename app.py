@@ -378,16 +378,17 @@ def image_png():
     return send_file(png, mimetype="image/png")
 
 # Fast JSON for TRMNL Redirect plugin (keep this quick; no GAS call here)
+from datetime import datetime, timezone, timedelta
 @app.get("/redirect")
 def redirect_json():
-    a = (request.args.get("stop_a") or DEFAULT_A).strip()
-    b = (request.args.get("stop_b") or DEFAULT_B).strip()
-    c = (request.args.get("stop_c") or DEFAULT_C).strip()
-    minute_bucket = int(time.time() // 60)
-    root = request.url_root.rstrip("/")
-    img_url = f"{root}/image.png?stop_a={a}&stop_b={b}&stop_c={c}&t={minute_bucket}"
+    sgt = timezone(timedelta(hours=8))
+    tick = datetime.now(sgt).strftime("%Y%m%d%H%M")  # changes every minute
+    stop_a = request.args.get("stop_a","45379")
+    stop_b = request.args.get("stop_b","45489")
+    stop_c = request.args.get("stop_c","45371")
+    img_url = url_for("image_png", _external=True, stop_a=stop_a, stop_b=stop_b, stop_c=stop_c)
     return jsonify({
-        "filename": f"bus-{minute_bucket}",
+        "filename": f"bus-{tick}",
         "url": img_url,
         "refresh_rate": 60
     })
