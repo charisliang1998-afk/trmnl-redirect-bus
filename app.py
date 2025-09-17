@@ -11,6 +11,15 @@ from PIL import Image, ImageDraw, ImageFont
 app = Flask(__name__)
 GAS_URL = f"https://script.google.com/macros/s/{GAS_DEPLOYMENT_ID}/exec"
 
+from flask import jsonify, request
+
+@app.get("/debug")
+def debug():
+    a = (request.args.get("stop_a") or DEFAULT_A).strip()
+    b = (request.args.get("stop_b") or DEFAULT_B).strip()
+    c = (request.args.get("stop_c") or DEFAULT_C).strip()
+    return jsonify(fetch_bus(a, b, c))
+
 def fetch_bus(stopa, stopb, stopc):
     try:
         r = requests.get(GAS_URL, params={"stop_a": stopa, "stop_b": stopb, "stop_c": stopc}, timeout=3)
