@@ -7,7 +7,7 @@ DEFAULT_A, DEFAULT_B, DEFAULT_C = "45379", "45489", "45371"
 
 # ----------------------------------------------------------------------------
 from flask import Flask, request, jsonify, send_file
-import os, io, time, requests
+import os, io, requests
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
@@ -46,20 +46,21 @@ def _empty_payload(a, b, c):
         "stop_c": {"name": f"{c}", "code": c, "services": []},
     }
 
-# ---------- Canvas & Layout base constants ----------------------------------
+# ---------- Canvas & layout --------------------------------------------------
 W, H = 800, 480
 PAD_L, PAD_R, PAD_T, PAD_B = 20, 20, 22, 16
 STAMP_PAD_TOP = 20
 
-# ---------- Visual tuning (bigger timings, more breathing space) ------------
+# ---------- Visual tuning ----------------------------------------------------
+# Smaller stop names, slightly larger routes, biggest timings. Extra breathing space.
 STAMP_SIZE = 12     # "Updated HH:MM"
-NAME_SIZE  = 28     # stop names (smaller)
-SVC_SIZE   = 24     # route numbers (smaller)
-TIME_SIZE  = 30     # arrival lines (bigger)
+NAME_SIZE  = 22     # stop names (smaller)
+SVC_SIZE   = 28     # route numbers (medium)
+TIME_SIZE  = 32     # timings (largest)
 
-COL_GAP       = 32  # more gap between A and B columns
-SVC_COL       = 125 # route number column width
-LINE_GAP      = 8   # gap between the 3 vertical time lines
+COL_GAP       = 32  # gap between A and B columns
+SVC_COL       = 120 # route number column width (smaller -> more room for times)
+LINE_GAP      = 10  # gap between the 3 vertical time lines
 EXTRA_ROW_PAD = 12  # extra space under each route row
 TITLE_GAP     = 8   # gap under stop titles
 
@@ -121,6 +122,38 @@ def _draw_text(d, x, y, s, font, *, bold=False):
     else:
         d.text((x, y), s, 0, font=font)
 
+def _primary_name(name: str) -> str:
+    """
+    Return the name without any trailing ' ( ... )' part.
+    Examples:
+      'Opp Blk 123 (Main Rd)' -> 'Opp Blk 123'
+      'Dhoby Ghaut Stn'       -> 'Dhoby Ghaut Stn'
+    """
+    if not name:
+        return ""
+    i = name.find(" (")
+    return name[:i] if i >= 0 else name
+
+def _min_str(v):
+    """Render minutes-only string (no clock times). Unknown -> '—'."""
+    if v is None:
+        return "—"
+    try:
+        s = str(v).strip()
+        if s == "" or s.lower() in ("", "na", "none"):
+            return "—"
+        # some feeds return "Arr" / "ARR" or "0"
+        if s.lower().startswith("arr"):
+            return "0m"
+        # keep only integer-ish part
+        # allow "5" or "5.0"
+        n = int(float(s))
+        if n < 0:  # guard
+            return "—"
+        return f"{n}m"
+    except Exception:
+        return "—"
+
 # ---------- Image renderer (auto-fit) ---------------------------------------
 def draw_image(data):
     """
@@ -129,6 +162,7 @@ def draw_image(data):
       - C full-width under the taller of A/B (2 routes side-by-side)
       - BIG timings, smaller names/routes, extra breathing space
       - SGT 'Updated HH:MM' top-right
+      - Shows ONLY minutes (no clock times)
       - Auto-scales down slightly if content would overflow
     """
     img = Image.new("L", (W, H), 255)
@@ -148,7 +182,8 @@ def draw_image(data):
         col_w   = (W - PAD_L - PAD_R - COL_GAP) // 2
 
         def measure_block(stop_obj, col_width):
-            name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
+            raw = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
+            name = _primary_name(raw)
             name_lines = _wrap(d, name, f_name, col_width)
             lh_name = _line_h(d, f_name)
             name_h  = len(name_lines)*lh_name + TITLE_GAP
@@ -167,7 +202,8 @@ def draw_image(data):
         C_y = grid_y + max(A_h, B_h) + 12
         C_w = W - PAD_L - PAD_R
 
-        name_c = (data.get("stop_c") or {}).get("name") or (data.get("stop_c") or {}).get("code") or ""
+        raw_c = (data.get("stop_c") or {}).get("name") or (data.get("stop_c") or {}).get("code") or ""
+        name_c = _primary_name(raw_c)
         c_lines = _wrap(d, name_c, f_name, C_w)
         lh_name = _line_h(d, f_name)
         c_title_h = len(c_lines)*lh_name + TITLE_GAP
@@ -190,8 +226,8 @@ def draw_image(data):
         avail = H - grid_y - PAD_B
         need  = total_bottom - grid_y - PAD_B
         scale = max(0.72, min(0.96, avail / max(need, 1)))
-        name_sz  = max(22, int(name_sz  * scale))
-        svc_sz   = max(20, int(svc_sz   * scale))
+        name_sz  = max(20, int(name_sz  * scale))
+        svc_sz   = max(22, int(svc_sz   * scale))
         time_sz  = max(22, int(time_sz  * scale))   # keep timings larger than titles
         stamp_sz = max(11, int(stamp_sz * scale))
         line_gap = max(6,  int(line_gap * scale))
@@ -214,7 +250,8 @@ def draw_image(data):
     B_x, B_y = PAD_L + col_w + COL_GAP, A_y
 
     def render_block(stop_obj, x0, y0, max_services=3, name_w=col_w):
-        name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
+        raw = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
+        name = _primary_name(raw)
         lines = _wrap(d, name, f_name, name_w)
         lh_name = _line_h(d, f_name)
         ny = y0
@@ -228,11 +265,13 @@ def draw_image(data):
 
         services = (stop_obj or {}).get("services") or []
         for s in services[:max_services]:
+            # route number
             _draw_text(d, x0, ny, str(s.get("no","?")), f_svc, bold=True)
+            # three vertical minutes (no clock times)
             times_x = x0 + SVC_COL
-            _draw_text(d, times_x, ny + 0*(lh_time + line_gap), f"{s.get('time1','--:--')} ({s.get('min1','—')}m)", f_time)
-            _draw_text(d, times_x, ny + 1*(lh_time + line_gap), f"{s.get('time2','--:--')} ({s.get('min2','—')}m)", f_time)
-            _draw_text(d, times_x, ny + 2*(lh_time + line_gap), f"{s.get('time3','--:--')} ({s.get('min3','—')}m)", f_time)
+            _draw_text(d, times_x, ny + 0*(lh_time + line_gap), _min_str(s.get("min1")), f_time)
+            _draw_text(d, times_x, ny + 1*(lh_time + line_gap), _min_str(s.get("min2")), f_time)
+            _draw_text(d, times_x, ny + 2*(lh_time + line_gap), _min_str(s.get("min3")), f_time)
             ny += row_adv
         return ny
 
@@ -245,7 +284,8 @@ def draw_image(data):
     C_w = W - PAD_L - PAD_R
 
     stop_c = data.get("stop_c") or {}
-    name_c = stop_c.get("name") or stop_c.get("code") or ""
+    raw_c = stop_c.get("name") or stop_c.get("code") or ""
+    name_c = _primary_name(raw_c)
     c_lines = _wrap(d, name_c, f_name, C_w)
     lh_name = _line_h(d, f_name)
     ny = C_y
@@ -260,9 +300,9 @@ def draw_image(data):
     def render_c_service(svc, x0, y0):
         _draw_text(d, x0, y0, str(svc.get("no","?")), f_svc, bold=True)
         times_x = x0 + SVC_COL
-        _draw_text(d, times_x, y0 + 0*(lh_time + line_gap), f"{svc.get('time1','--:--')} ({svc.get('min1','—')}m)", f_time)
-        _draw_text(d, times_x, y0 + 1*(lh_time + line_gap), f"{svc.get('time2','--:--')} ({svc.get('min2','—')}m)", f_time)
-        _draw_text(d, times_x, y0 + 2*(lh_time + line_gap), f"{svc.get('time3','--:--')} ({svc.get('min3','—')}m)", f_time)
+        _draw_text(d, times_x, y0 + 0*(lh_time + line_gap), _min_str(svc.get("min1")), f_time)
+        _draw_text(d, times_x, y0 + 1*(lh_time + line_gap), _min_str(svc.get("min2")), f_time)
+        _draw_text(d, times_x, y0 + 2*(lh_time + line_gap), _min_str(svc.get("min3")), f_time)
 
     inner_gap = COL_GAP
     inner_w   = (C_w - inner_gap) // 2
@@ -357,7 +397,7 @@ def fontsample():
     d   = ImageDraw.Draw(img)
     f_name, f_svc, f_time, f_stamp, _ = _load_fonts()
     d.text((10, 10),  "Stop Name (Bold) — Inter", 0, font=f_name, stroke_width=1, stroke_fill=0)
-    d.text((10, 50),  "307 | 15:32 (6m) • 15:48 (22m) • 16:03 (37m)", 0, font=f_time)
+    d.text((10, 50),  "307  |  6m • 17m • 32m", 0, font=f_time)
     d.text((10, 90),  "Updated 12:34", 0, font=f_stamp)
     out = io.BytesIO(); img.convert("1").save(out, "PNG"); out.seek(0)
     return send_file(out, mimetype="image/png")
