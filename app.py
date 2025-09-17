@@ -48,35 +48,35 @@ import os, io, requests
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
-# Canvas + layout
+# Canvas & layout
 W, H                          = 800, 480
 PAD_L, PAD_R, PAD_T, PAD_B    = 20, 20, 22, 16
 STAMP_PAD_TOP                 = 20
 COL_GAP, ROW_GAP              = 24, 14
-SVC_COL                       = 130     # route-number column width (bump to 140 if needed)
+SVC_COL                       = 140     # fixed route column (room for 4-char like 971E)
 LINE_GAP                      = 6
 
-# Font sizes tuned for 800x480 e-ink
+# Inter sizes tuned for 800x480 (feel free to tweak ±2 later)
 STAMP_SIZE = 13               # "Updated HH:MM"
-NAME_SIZE  = 34               # stop names
-SVC_SIZE   = 30               # route numbers
-TIME_SIZE  = 26               # each vertical time line
+NAME_SIZE  = 34               # stop names (Bold)
+SVC_SIZE   = 32               # route numbers (Bold)
+TIME_SIZE  = 26               # each vertical time line (Regular)
 
-# --------- fonts (download once to /tmp so you don't have to upload) -------
-TMP_DIR = "/tmp/fonts"
-os.makedirs(TMP_DIR, exist_ok=True)
-REG_PATH  = os.path.join(TMP_DIR, "DejaVuSans.ttf")
-BOLD_PATH = os.path.join(TMP_DIR, "DejaVuSans-Bold.ttf")
+# ---- fonts: download Inter Regular/Bold to /tmp so no repo upload is needed
+TMP_DIR = "/tmp/fonts"; os.makedirs(TMP_DIR, exist_ok=True)
+REG_PATH  = os.path.join(TMP_DIR, "Inter-Regular.ttf")
+BOLD_PATH = os.path.join(TMP_DIR, "Inter-Bold.ttf")
 
+# You can override these via env vars FONT_URL_REG / FONT_URL_BOLD if you want
 REG_URL  = os.getenv("FONT_URL_REG",
-    "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans.ttf")
+    "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-Regular.ttf")
 BOLD_URL = os.getenv("FONT_URL_BOLD",
-    "https://github.com/dejavu-fonts/dejavu-fonts/raw/version_2_37/ttf/DejaVuSans-Bold.ttf")
+    "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-Bold.ttf")
 
 def _ensure_fonts():
     for path, url in [(REG_PATH, REG_URL), (BOLD_PATH, BOLD_URL)]:
         if not os.path.exists(path):
-            r = requests.get(url, timeout=15)
+            r = requests.get(url, timeout=20)
             r.raise_for_status()
             with open(path, "wb") as f:
                 f.write(r.content)
@@ -90,7 +90,7 @@ def _load_fonts():
         f_stamp = ImageFont.truetype(REG_PATH,  STAMP_SIZE)
         return f_name, f_svc, f_time, f_stamp
     except Exception:
-        # hard fallback (shouldn't happen)
+        # Hard fallback (shouldn’t happen, but keeps things running)
         f = ImageFont.load_default()
         return f, f, f, f
 
@@ -100,31 +100,27 @@ def _line_h(draw, font):
 
 def _wrap_lines(draw, text, font, max_w):
     words = (text or "").split()
-    if not words:
-        return []
+    if not words: return []
     lines, cur = [], ""
     for w in words:
         test = w if not cur else cur + " " + w
         if draw.textlength(test, font=font) <= max_w:
             cur = test
         else:
-            if cur:
-                lines.append(cur)
+            if cur: lines.append(cur)
             cur = w
-    if cur:
-        lines.append(cur)
+    if cur: lines.append(cur)
     return lines
-    
-# ---- Image drawing (800x480, 1-bit) --------------------------------------
+
 def draw_image(data):
-    """800x480, 1-bit PNG with clean TTF text, SGT timestamp, wrapped names, no overlap."""
+    """800x480, 1-bit PNG with Inter font, SGT timestamp, wrapped names, no overlap."""
     img = Image.new("L", (W, H), 255)
     d   = ImageDraw.Draw(img)
     f_name, f_svc, f_time, f_stamp = _load_fonts()
 
     def text(x, y, s, f): d.text((x, y), s, 0, font=f)
 
-    # 1) Top-right stamp in Singapore time
+    # 1) Top-right "Updated" in Singapore time (UTC+8)
     sgt = timezone(timedelta(hours=8))
     now_hm = datetime.now(sgt).strftime("%H:%M")
     stamp  = f"Updated {now_hm}"
@@ -135,31 +131,30 @@ def draw_image(data):
 
     grid_y = PAD_T + STAMP_PAD_TOP + stamp_h
 
-    # 2) Two columns (A left, B right)
+    # 2) Two columns: A (left), B (right)
     col_w = (W - PAD_L - PAD_R - COL_GAP) // 2
     A_x, A_y = PAD_L, grid_y
     B_x, B_y = PAD_L + col_w + COL_GAP, grid_y
 
-    # Draw a stop block and return its bottom y
-    def draw_stop_block(stop_obj, x0, y0, max_services=3, name_width=col_w):
+    # Draw a stop block; return bottom y
+    def draw_stop_block(stop_obj, x0, y0, max_services=3, name_w=col_w):
         name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
-        lines = _wrap_lines(d, name, f_name, name_width)
+        lines = _wrap_lines(d, name, f_name, name_w)
         lh_name = _line_h(d, f_name)
         ny = y0
         for ln in lines:
             text(x0, ny, ln, f_name)
             ny += lh_name
-        ny += 6  # small gap under name
+        ny += 6  # small gap below name
 
         lh_time = _line_h(d, f_time)
-        # advance per service row (3 time lines + gaps + padding)
-        row_adv = 3*lh_time + 2*LINE_GAP + 8
+        row_adv = 3*lh_time + 2*LINE_GAP + 8  # spacing per route row
 
         services = (stop_obj or {}).get("services") or []
         for s in services[:max_services]:
-            # route number (fixed column)
+            # left fixed column: route number (bold)
             text(x0, ny, str(s.get("no","?")), f_svc)
-            # three vertical times
+            # right: three vertical times
             times_x = x0 + SVC_COL
             t1 = f"{s.get('time1','--:--')} ({s.get('min1','—')}m)"
             t2 = f"{s.get('time2','--:--')} ({s.get('min2','—')}m)"
@@ -170,10 +165,10 @@ def draw_image(data):
             ny += row_adv
         return ny
 
-    bottom_A = draw_stop_block(data.get("stop_a"), A_x, A_y, max_services=3, name_width=col_w)
-    bottom_B = draw_stop_block(data.get("stop_b"), B_x, B_y, max_services=3, name_width=col_w)
+    bottom_A = draw_stop_block(data.get("stop_a"), A_x, A_y, max_services=3, name_w=col_w)
+    bottom_B = draw_stop_block(data.get("stop_b"), B_x, B_y, max_services=3, name_w=col_w)
 
-    # 3) Stop C below the taller of A/B, with two inner columns (first two routes)
+    # 3) Stop C: full width under the taller of A/B; show first two routes side-by-side
     C_x = PAD_L
     C_y = max(bottom_A, bottom_B) + 12
     C_w = W - PAD_L - PAD_R
@@ -208,7 +203,7 @@ def draw_image(data):
     if len(servicesC) >= 2:
         draw_service(servicesC[1], C_x + inner_w + inner_gap, ny)
 
-    # 4) Convert to crisp 1-bit
+    # 4) Convert to crisp 1-bit PNG
     img1 = img.convert("1", dither=Image.NONE)
     buf = io.BytesIO()
     img1.save(buf, format="PNG", optimize=True)
