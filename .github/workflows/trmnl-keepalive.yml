@@ -1,0 +1,42 @@
+name: TRMNL Keepalive
+
+on:
+  schedule:
+    - cron: "*/2 * * * *"   # every 2 minutes
+  workflow_dispatch:        # allow manual "Run workflow" from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trmnl-keepalive
+  cancel-in-progress: false
+
+env:
+  BASE_URL: https://trmnl-redirect-bus.onrender.com
+  STOP_A: "45379"
+  STOP_B: "45489"
+  STOP_C: "45371"
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /healthz (fast)
+        run: |
+          curl -fsS -m 8 "$BASE_URL/healthz" -o /dev/null || echo "healthz failed"
+
+      - name: Ping /redirect (fast JSON)
+        run: |
+          curl -fsS -m 8 \
+            "$BASE_URL/redirect?stop_a=$STOP_A&stop_b=$STOP_B&stop_c=$STOP_C" \
+            -H 'Accept: application/json' -o /dev/null || echo "redirect failed"
+
+      - name: Occasionally warm /image.png (heavier)
+        run: |
+          if [ $((RANDOM % 5)) -eq 0 ]; then
+            curl -fsS -m 12 \
+              "$BASE_URL/image.png?stop_a=$STOP_A&stop_b=$STOP_B&stop_c=$STOP_C" \
+              -o /dev/null || echo "image failed"
+          fi
