@@ -2,8 +2,11 @@ name: TRMNL Keepalive
 
 on:
   schedule:
-    - cron: "*/2 * * * *"   # every 2 minutes
-  workflow_dispatch:        # allow manual "Run workflow" from the Actions tab
+    - cron: "* * * * *"      # every minute
+  workflow_dispatch:          # lets you click "Run workflow"
+  push:
+    paths:
+      - ".github/workflows/trmnl-keepalive.yml"
 
 permissions:
   contents: read
@@ -35,7 +38,7 @@ jobs:
 
       - name: Occasionally warm /image.png (heavier)
         run: |
-          if [ $((RANDOM % 5)) -eq 0 ]; then
+          if [ $((RANDOM % 2)) -eq 0 ]; then
             curl -fsS -m 12 \
               "$BASE_URL/image.png?stop_a=$STOP_A&stop_b=$STOP_B&stop_c=$STOP_C" \
               -o /dev/null || echo "image failed"
