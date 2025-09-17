@@ -82,107 +82,177 @@ def _load_fonts():
     except Exception:
         f = ImageFont.load_default()
         return f, f, f, f
-        
+
+import math
+from datetime import datetime, timezone, timedelta
+from PIL import ImageFont, Image, ImageDraw
+
+# Use Pillow's built-in bitmap font
+_DEF_FONT = ImageFont.load_default()
+
+# Scale factors for the default font (integers keep it crisp)
+SCALE_STAMP = 2   # top-right "Updated HH:MM"
+SCALE_NAME  = 3   # stop names
+SCALE_SVC   = 3   # route numbers (left column)
+SCALE_TIME  = 2   # vertical time lines
+
+# Canvas + layout constants
+W, H                          = 800, 480
+PAD_L, PAD_R, PAD_T, PAD_B    = 20, 20, 22, 16
+STAMP_PAD_TOP                 = 20
+COL_GAP, ROW_GAP              = 24, 14
+SVC_COL                       = 130      # fixed width so route numbers never hit times
+LINE_GAP                      = 8        # gap between the 3 vertical time lines
+
+def _line_h_base(draw):
+    # Accurate base line height for the default font
+    l, t, r, b = draw.textbbox((0, 0), "Hg", font=_DEF_FONT)
+    return b - t
+
+def _textlen_base(draw, text):
+    return draw.textlength(text, font=_DEF_FONT)
+
+def _textlen_scaled(draw, text, scale):
+    return int(round(_textlen_base(draw, text) * scale))
+
+def _line_h_scaled(draw, scale):
+    return int(round(_line_h_base(draw) * scale))
+
+def _wrap_lines_scaled(draw, text, scale, max_w):
+    words = (text or "").split()
+    if not words:
+        return []
+    lines, cur = [], ""
+    while words:
+        w = words.pop(0)
+        test = w if not cur else cur + " " + w
+        if _textlen_scaled(draw, test, scale) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+def _draw_text_scaled(img, draw, x, y, text, scale):
+    """Draw default-font text scaled up crisply (nearest-neighbor)."""
+    if not text:
+        return
+    base_w = max(1, int(math.ceil(_textlen_base(draw, text))))
+    base_h = max(1, _line_h_base(draw))
+    # Render at base size into a small white image
+    small = Image.new("L", (base_w, base_h), 255)
+    d2 = ImageDraw.Draw(small)
+    d2.text((0, 0), text, 0, font=_DEF_FONT)
+    # Scale up
+    big_w = max(1, int(round(base_w * scale)))
+    big_h = max(1, int(round(base_h * scale)))
+    big = small.resize((big_w, big_h), resample=Image.NEAREST)
+    # Build mask from black text
+    mask = big.point(lambda p: 255 if p < 128 else 0)
+    # Paste black text onto the main canvas
+    img.paste(0, (int(x), int(y)), mask)
+    
 # ---- Image drawing (800x480, 1-bit) --------------------------------------
 def draw_image(data):
     """
-    Render 800x480, 1-bit PNG with:
-      - Stop A (left) + Stop B (right) on top
-      - Stop C full-width at bottom (two side-by-side routes)
-      - Vertical times (3 lines) per route
-      - Top-right "Updated HH:MM"
-      - Fixed-width route column so numbers don’t bleed into times
+    800x480, 1-bit PNG using ONLY the default Pillow font (scaled up crisply):
+      • A (left) + B (right) on top, names wrap within their columns
+      • C spans full width underneath the taller of A/B (two inner columns)
+      • Fixed route-number column; three vertical time lines per route
+      • 'Updated HH:MM' in Singapore time (UTC+8) at top-right
     """
-    import time as _t
-
-    img = Image.new("L", (W, H), 255)  # grayscale first (crisper text), then convert to 1-bit
+    img = Image.new("L", (W, H), 255)
     d   = ImageDraw.Draw(img)
-    font_name, font_svc, font_time, font_stamp = _load_fonts()
 
-    def text(x, y, s, f): d.text((x, y), s, 0, font=f)
-
-    # 1) Timestamp (top-right)
-    now_hm = _t.strftime("%H:%M")
+    # ---------- 1) Stamp (SG time) ----------
+    sgt = timezone(timedelta(hours=8))
+    now_hm = datetime.now(sgt).strftime("%H:%M")
     stamp  = f"Updated {now_hm}"
-    tx     = W - PAD_R - d.textlength(stamp, font_stamp)
-    ty     = PAD_T
-    text(tx, ty, stamp, font_stamp)
+    stamp_h = _line_h_scaled(d, SCALE_STAMP)
+    tx = W - PAD_R - _textlen_scaled(d, stamp, SCALE_STAMP)
+    ty = PAD_T
+    _draw_text_scaled(img, d, tx, ty, stamp, SCALE_STAMP)
 
-    # 2) Coordinates for A/B/C (mirrors your private plugin layout)
-    grid_y  = PAD_T + STAMP_PAD_TOP
-    col_w   = (W - PAD_L - PAD_R - COL_GAP) // 2
-    A_x     = PAD_L
-    B_x     = PAD_L + col_w + COL_GAP
-    A_y = B_y = grid_y
+    grid_y = PAD_T + STAMP_PAD_TOP + stamp_h
 
-    C_x     = PAD_L
-    C_y     = 250  # tuned to fit cleanly with big text
-    C_w     = W - PAD_L - PAD_R
+    # ---------- 2) Column geometry ----------
+    col_w = (W - PAD_L - PAD_R - COL_GAP) // 2
+    A_x, A_y = PAD_L, grid_y
+    B_x, B_y = PAD_L + col_w + COL_GAP, grid_y
 
-    # ----- helper: draw a stop block (name + up to 3 services with 3 vertical times) -----
-    def draw_stop_block(stop_obj, x0, y0, max_services=3):
+    # ---------- 3) Draw A & B with wrapped titles ----------
+    def draw_stop_block(stop_obj, x0, y0, max_services=3, name_scale=SCALE_NAME):
         name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
-        text(x0, y0, name, font_name)
-        y = y0 + NAME_SIZE
+        lines = _wrap_lines_scaled(d, name, name_scale, col_w)
+        lh_name = _line_h_scaled(d, name_scale)
+        ny = y0
+        for ln in lines:
+            _draw_text_scaled(img, d, x0, ny, ln, name_scale)
+            ny += lh_name
+        ny += 6  # small gap under name
 
+        lh_time = _line_h_scaled(d, SCALE_TIME)
         services = (stop_obj or {}).get("services") or []
         for s in services[:max_services]:
-            # left fixed column: route number
-            svc = str(s.get("no", "?"))
-            text(x0, y, svc, font_svc)
-
-            # right flexible column: 3 vertical times
+            # route number (fixed column)
+            _draw_text_scaled(img, d, x0, ny, str(s.get("no","?")), SCALE_SVC)
+            # three vertical times
             times_x = x0 + SVC_COL
             t1 = f"{s.get('time1','--:--')} ({s.get('min1','—')}m)"
             t2 = f"{s.get('time2','--:--')} ({s.get('min2','—')}m)"
             t3 = f"{s.get('time3','--:--')} ({s.get('min3','—')}m)"
-            text(times_x, y + 0,                        t1, font_time)
-            text(times_x, y + TIME_SIZE + LINE_GAP,     t2, font_time)
-            text(times_x, y + 2*(TIME_SIZE + LINE_GAP), t3, font_time)
+            _draw_text_scaled(img, d, times_x, ny + 0*(lh_time + LINE_GAP), t1, SCALE_TIME)
+            _draw_text_scaled(img, d, times_x, ny + 1*(lh_time + LINE_GAP), t2, SCALE_TIME)
+            _draw_text_scaled(img, d, times_x, ny + 2*(lh_time + LINE_GAP), t3, SCALE_TIME)
+            # advance to next service row
+            row_adv = 3*lh_time + 2*LINE_GAP + 8
+            ny += row_adv
+        return ny
 
-            y += ROW_ADV
+    bottom_A = draw_stop_block(data.get("stop_a"), A_x, A_y, max_services=3)
+    bottom_B = draw_stop_block(data.get("stop_b"), B_x, B_y, max_services=3)
 
-    # Top: Stop A + Stop B (3 routes each)
-    draw_stop_block(data.get("stop_a"), A_x, A_y, max_services=3)
-    draw_stop_block(data.get("stop_b"), B_x, B_y, max_services=3)
+    # ---------- 4) Draw C below the taller of A/B ----------
+    C_x = PAD_L
+    C_y = max(bottom_A, bottom_B) + 12
+    C_w = W - PAD_L - PAD_R
 
-    # Bottom: Stop C name + two inner columns (2 routes, each with 3 vertical times)
+    # C title (wrap to full width)
     stop_c = data.get("stop_c") or {}
     name_c = stop_c.get("name") or stop_c.get("code") or ""
-    text(C_x, C_y, name_c, font_name)
+    c_lines = _wrap_lines_scaled(d, name_c, SCALE_NAME, C_w)
+    lh_name = _line_h_scaled(d, SCALE_NAME)
+    ny = C_y
+    for ln in c_lines:
+        _draw_text_scaled(img, d, C_x, ny, ln, SCALE_NAME)
+        ny += lh_name
+    ny += 6
 
+    # two inner columns (first two services from C)
     inner_gap = COL_GAP
     inner_w   = (C_w - inner_gap) // 2
     servicesC = (stop_c.get("services") or [])[:2]
+    lh_time   = _line_h_scaled(d, SCALE_TIME)
 
-    # Left inner route
+    def draw_service(svc, x0, y0):
+        _draw_text_scaled(img, d, x0, y0, str(svc.get("no","?")), SCALE_SVC)
+        times_x = x0 + SVC_COL
+        t1 = f"{svc.get('time1','--:--')} ({svc.get('min1','—')}m)"
+        t2 = f"{svc.get('time2','--:--')} ({svc.get('min2','—')}m)"
+        t3 = f"{svc.get('time3','--:--')} ({svc.get('min3','—')}m)"
+        _draw_text_scaled(img, d, times_x, y0 + 0*(lh_time + LINE_GAP), t1, SCALE_TIME)
+        _draw_text_scaled(img, d, times_x, y0 + 1*(lh_time + LINE_GAP), t2, SCALE_TIME)
+        _draw_text_scaled(img, d, times_x, y0 + 2*(lh_time + LINE_GAP), t3, SCALE_TIME)
+
     if len(servicesC) >= 1:
-        s = servicesC[0]
-        y = C_y + NAME_SIZE
-        text(C_x, y, str(s.get("no","?")), font_svc)
-        times_x = C_x + SVC_COL
-        t1 = f"{s.get('time1','--:--')} ({s.get('min1','—')}m)"
-        t2 = f"{s.get('time2','--:--')} ({s.get('min2','—')}m)"
-        t3 = f"{s.get('time3','--:--')} ({s.get('min3','—')}m)"
-        text(times_x, y + 0,                        t1, font_time)
-        text(times_x, y + TIME_SIZE + LINE_GAP,     t2, font_time)
-        text(times_x, y + 2*(TIME_SIZE + LINE_GAP), t3, font_time)
-
-    # Right inner route
+        draw_service(servicesC[0], C_x, ny)
     if len(servicesC) >= 2:
-        s = servicesC[1]
-        xR = C_x + inner_w + inner_gap
-        y  = C_y + NAME_SIZE
-        text(xR, y, str(s.get("no","?")), font_svc)
-        times_x = xR + SVC_COL
-        t1 = f"{s.get('time1','--:--')} ({s.get('min1','—')}m)"
-        t2 = f"{s.get('time2','--:--')} ({s.get('min2','—')}m)"
-        t3 = f"{s.get('time3','--:--')} ({s.get('min3','—')}m)"
-        text(times_x, y + 0,                        t1, font_time)
-        text(times_x, y + TIME_SIZE + LINE_GAP,     t2, font_time)
-        text(times_x, y + 2*(TIME_SIZE + LINE_GAP), t3, font_time)
+        draw_service(servicesC[1], C_x + inner_w + inner_gap, ny)
 
-    # Convert to crisp 1-bit (no dithering)
+    # ---------- 5) Convert to crisp 1-bit ----------
     img1 = img.convert("1", dither=Image.NONE)
     buf = io.BytesIO()
     img1.save(buf, format="PNG", optimize=True)
