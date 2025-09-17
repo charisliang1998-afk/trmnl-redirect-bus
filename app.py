@@ -110,20 +110,108 @@ def _draw_text(d, x, y, s, font, *, bold=False):
     else:
         d.text((x, y), s, 0, font=font)
 
+def _load_fonts_sizes(name_sz, svc_sz, time_sz, stamp_sz):
+    """
+    Load Inter (local variable TTF) at the given sizes; fall back to Pillow default if needed.
+    """
+    try:
+        f_name  = ImageFont.truetype(INTER_VAR_PATH, name_sz)
+        f_svc   = ImageFont.truetype(INTER_VAR_PATH, svc_sz)
+        f_time  = ImageFont.truetype(INTER_VAR_PATH, time_sz)
+        f_stamp = ImageFont.truetype(INTER_VAR_PATH, stamp_sz)
+        return f_name, f_svc, f_time, f_stamp, True
+    except Exception as e:
+        print("FONT WARNING (dynamic sizes):", repr(e))
+        f = ImageFont.load_default()
+        return f, f, f, f, False
+        
 def draw_image(data):
     """
-    800x480, 1-bit PNG:
-      - A (left) + B (right) on top
-      - C spans full width below taller of A/B (two inner columns)
-      - Inter variable font from repo, faux-bold for names/routes
-      - SGT 'Updated HH:MM' at top-right
-      - Wrapped titles; fixed route column; 3 vertical time lines
+    800x480, 1-bit PNG with Inter + auto-fit:
+      - A (left) and B (right) on top (up to 3 routes each)
+      - C full-width below the taller of A/B (two side-by-side routes)
+      - SGT 'Updated HH:MM' top-right
+      - Wrap stop names, fixed route column, 3 vertical times per route
+      - If content would overflow, text sizes + line gaps scale down to fit
     """
+    from datetime import datetime, timezone, timedelta
     img = Image.new("L", (W, H), 255)
     d   = ImageDraw.Draw(img)
-    f_name, f_svc, f_time, f_stamp, have_inter = _load_fonts()
 
-    # 1) Top-right 'Updated' in Singapore time
+    # --- start with your base sizes/gaps
+    name_sz  = NAME_SIZE
+    svc_sz   = SVC_SIZE
+    time_sz  = TIME_SIZE
+    stamp_sz = STAMP_SIZE
+    line_gap = LINE_GAP
+
+    # --- function to measure layout height without drawing
+    def measure_total(f_name, f_svc, f_time, f_stamp, line_gap_now):
+        # 1) stamp height + grid top
+        stamp_h = _line_h(d, f_stamp)
+        grid_y  = PAD_T + STAMP_PAD_TOP + stamp_h
+
+        # 2) columns
+        col_w = (W - PAD_L - PAD_R - COL_GAP) // 2
+
+        def measure_block(stop_obj, col_width):
+            name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
+            name_lines = _wrap(d, name, f_name, col_width)
+            lh_name = _line_h(d, f_name)
+            name_h  = len(name_lines)*lh_name + 6
+
+            lh_time = _line_h(d, f_time)
+            row_adv = 3*lh_time + 2*line_gap_now + 8
+
+            services = (stop_obj or {}).get("services") or []
+            svc_rows = min(3, len(services))
+            body_h   = svc_rows * row_adv
+            return name_h + body_h
+
+        A_h = measure_block(data.get("stop_a"), col_w)
+        B_h = measure_block(data.get("stop_b"), col_w)
+
+        C_y = grid_y + max(A_h, B_h) + 12
+        # C block: title + one row height (two columns side-by-side share the same vertical row)
+        name_c = (data.get("stop_c") or {}).get("name") or (data.get("stop_c") or {}).get("code") or ""
+        C_w = W - PAD_L - PAD_R
+        c_lines = _wrap(d, name_c, f_name, C_w)
+        lh_name = _line_h(d, f_name)
+        c_title_h = len(c_lines)*lh_name + 6
+
+        lh_time = _line_h(d, f_time)
+        row_adv = 3*lh_time + 2*line_gap_now + 8
+
+        # If there are no services at stop C, row_adv contributes 0
+        servicesC = (data.get("stop_c") or {}).get("services") or []
+        c_body_h  = row_adv if len(servicesC) >= 1 else 0
+
+        total_bottom = C_y + c_title_h + c_body_h + PAD_B
+        return total_bottom, grid_y, col_w, C_y, C_w
+
+    # --- try up to 4 passes to fit (scale down if needed)
+    for _ in range(4):
+        f_name, f_svc, f_time, f_stamp, _ok = _load_fonts_sizes(name_sz, svc_sz, time_sz, stamp_sz)
+        total_bottom, grid_y, col_w, C_y, C_w = measure_total(f_name, f_svc, f_time, f_stamp, line_gap)
+
+        if total_bottom <= H:
+            break  # fits!
+        # compute scale factor to fit the remaining space
+        # available drawable height from grid_y to bottom including PAD_B
+        avail = H - grid_y - PAD_B
+        need  = total_bottom - grid_y - PAD_B
+        scale = max(0.75, min(0.98, avail / max(need, 1)))  # clamp a bit to avoid too tiny
+        # downscale sizes + gaps
+        name_sz  = max(24, int(name_sz  * scale))
+        svc_sz   = max(22, int(svc_sz   * scale))
+        time_sz  = max(20, int(time_sz  * scale))
+        stamp_sz = max(12, int(stamp_sz * scale))
+        line_gap = max(4,  int(line_gap * scale))
+
+    # --- with final sizes, load fonts and DRAW for real
+    f_name, f_svc, f_time, f_stamp, _ok = _load_fonts_sizes(name_sz, svc_sz, time_sz, stamp_sz)
+
+    # 1) Stamp (SGT)
     sgt = timezone(timedelta(hours=8))
     now_hm = datetime.now(sgt).strftime("%H:%M")
     stamp  = f"Updated {now_hm}"
@@ -132,45 +220,41 @@ def draw_image(data):
     ty = PAD_T
     _draw_text(d, tx, ty, stamp, f_stamp, bold=False)
 
-    grid_y = PAD_T + STAMP_PAD_TOP + stamp_h
-
-    # 2) Columns A (left) and B (right)
+    # 2) Columns A & B
     col_w = (W - PAD_L - PAD_R - COL_GAP) // 2
-    A_x, A_y = PAD_L, grid_y
-    B_x, B_y = PAD_L + col_w + COL_GAP, grid_y
+    A_x, A_y = PAD_L, (PAD_T + STAMP_PAD_TOP + stamp_h)
+    B_x, B_y = PAD_L + col_w + COL_GAP, A_y
 
-    def draw_stop_block(stop_obj, x0, y0, max_services=3, name_w=col_w):
+    def render_block(stop_obj, x0, y0, max_services=3, name_w=col_w):
         name = (stop_obj or {}).get("name") or (stop_obj or {}).get("code") or ""
         lines = _wrap(d, name, f_name, name_w)
         lh_name = _line_h(d, f_name)
         ny = y0
         for ln in lines:
-            _draw_text(d, x0, ny, ln, f_name, bold=True)   # faux-bold for title
+            _draw_text(d, x0, ny, ln, f_name, bold=True)
             ny += lh_name
         ny += 6
 
         lh_time = _line_h(d, f_time)
-        row_adv = 3*lh_time + 2*LINE_GAP + 8
+        row_adv = 3*lh_time + 2*line_gap + 8
 
         services = (stop_obj or {}).get("services") or []
         for s in services[:max_services]:
-            # route number (bold)
             _draw_text(d, x0, ny, str(s.get("no","?")), f_svc, bold=True)
-            # three vertical times (regular)
             times_x = x0 + SVC_COL
             t1 = f"{s.get('time1','--:--')} ({s.get('min1','—')}m)"
             t2 = f"{s.get('time2','--:--')} ({s.get('min2','—')}m)"
             t3 = f"{s.get('time3','--:--')} ({s.get('min3','—')}m)"
-            _draw_text(d, times_x, ny + 0*(lh_time + LINE_GAP), t1, f_time)
-            _draw_text(d, times_x, ny + 1*(lh_time + LINE_GAP), t2, f_time)
-            _draw_text(d, times_x, ny + 2*(lh_time + LINE_GAP), t3, f_time)
+            _draw_text(d, times_x, ny + 0*(lh_time + line_gap), t1, f_time)
+            _draw_text(d, times_x, ny + 1*(lh_time + line_gap), t2, f_time)
+            _draw_text(d, times_x, ny + 2*(lh_time + line_gap), t3, f_time)
             ny += row_adv
         return ny
 
-    bottom_A = draw_stop_block(data.get("stop_a"), A_x, A_y, max_services=3, name_w=col_w)
-    bottom_B = draw_stop_block(data.get("stop_b"), B_x, B_y, max_services=3, name_w=col_w)
+    bottom_A = render_block(data.get("stop_a"), A_x, A_y, max_services=3, name_w=col_w)
+    bottom_B = render_block(data.get("stop_b"), B_x, B_y, max_services=3, name_w=col_w)
 
-    # 3) Stop C below the taller of A/B; two inner columns (first two routes)
+    # 3) Stop C (full width under the taller of A/B)
     C_x = PAD_L
     C_y = max(bottom_A, bottom_B) + 12
     C_w = W - PAD_L - PAD_R
@@ -185,27 +269,22 @@ def draw_image(data):
         ny += lh_name
     ny += 6
 
-    inner_gap = COL_GAP
-    inner_w   = (C_w - inner_gap) // 2
     servicesC = (stop_c.get("services") or [])[:2]
     lh_time   = _line_h(d, f_time)
 
-    def draw_service(svc, x0, y0):
+    def render_c_service(svc, x0, y0):
         _draw_text(d, x0, y0, str(svc.get("no","?")), f_svc, bold=True)
         times_x = x0 + SVC_COL
-        t1 = f"{svc.get('time1','--:--')} ({svc.get('min1','—')}m)"
-        t2 = f"{svc.get('time2','--:--')} ({svc.get('min2','—')}m)"
-        t3 = f"{svc.get('time3','--:--')} ({svc.get('min3','—')}m)"
-        _draw_text(d, times_x, y0 + 0*(lh_time + LINE_GAP), t1, f_time)
-        _draw_text(d, times_x, y0 + 1*(lh_time + LINE_GAP), t2, f_time)
-        _draw_text(d, times_x, y0 + 2*(lh_time + LINE_GAP), t3, f_time)
+        _draw_text(d, times_x, y0 + 0*(lh_time + line_gap), f"{svc.get('time1','--:--')} ({svc.get('min1','—')}m)", f_time)
+        _draw_text(d, times_x, y0 + 1*(lh_time + line_gap), f"{svc.get('time2','--:--')} ({svc.get('min2','—')}m)", f_time)
+        _draw_text(d, times_x, y0 + 2*(lh_time + line_gap), f"{svc.get('time3','--:--')} ({svc.get('min3','—')}m)", f_time)
 
-    if len(servicesC) >= 1:
-        draw_service(servicesC[0], C_x, ny)
-    if len(servicesC) >= 2:
-        draw_service(servicesC[1], C_x + inner_w + inner_gap, ny)
+    inner_gap = COL_GAP
+    inner_w   = (C_w - inner_gap) // 2
+    if len(servicesC) >= 1: render_c_service(servicesC[0], C_x, ny)
+    if len(servicesC) >= 2: render_c_service(servicesC[1], C_x + inner_w + inner_gap, ny)
 
-    # 4) Convert to crisp 1-bit PNG
+    # 4) 1-bit output (crisp)
     img1 = img.convert("1", dither=Image.NONE)
     buf = io.BytesIO()
     img1.save(buf, format="PNG", optimize=True)
