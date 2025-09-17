@@ -7,11 +7,15 @@ DEFAULT_A, DEFAULT_B, DEFAULT_C = "45379", "45489", "45371"
 
 # ----------------------------------------------------------------------------
 from flask import Flask, request, jsonify, send_file
-import os, io, requests
+import os, io, time, requests
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
+
+# Simple in-memory cache of last-good payloads per (A,B,C)
+CACHE = {}  # { (a,b,c): {"data": {...}, "ts": unix} }
+CACHE_MAX_AGE_SEC = int(os.getenv("CACHE_MAX_AGE_SEC", "600"))  # 10 min soft cap
 
 # ---------- Google Apps Script helpers --------------------------------------
 def gas_base_url():
@@ -23,28 +27,61 @@ def gas_base_url():
         return val.split("?")[0]  # strip any old query string
     return f"https://script.google.com/macros/s/{val}/exec"
 
-def fetch_bus(stopa, stopb, stopc, timeout_sec=5):
-    url = gas_base_url()
-    if not url:
-        return _empty_payload(stopa, stopb, stopc)
-    try:
-        r = requests.get(
-            url,
-            params={"stop_a": stopa, "stop_b": stopb, "stop_c": stopc},
-            timeout=timeout_sec
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print("GAS fetch failed:", repr(e))
-        return _empty_payload(stopa, stopb, stopc)
-
 def _empty_payload(a, b, c):
     return {
         "stop_a": {"name": f"{a}", "code": a, "services": []},
         "stop_b": {"name": f"{b}", "code": b, "services": []},
         "stop_c": {"name": f"{c}", "code": c, "services": []},
     }
+
+def fetch_bus(a, b, c, timeout_sec=6, retries=1, backoff_sec=0.3):
+    """
+    Fetch from GAS with small retry; on failure, reuse last-good cached data.
+    Returns (data_dict, is_stale_bool).
+    """
+    url = gas_base_url()
+    key = (a, b, c)
+
+    if not url:
+        data = _empty_payload(a, b, c)
+        data["_stale"] = True
+        data["_age_sec"] = None
+        return data, True
+
+    last = CACHE.get(key)
+
+    # Try live fetch (1 + retries)
+    err = None
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, params={"stop_a": a, "stop_b": b, "stop_c": c}, timeout=timeout_sec)
+            r.raise_for_status()
+            data = r.json() or {}
+            # Save to cache only if payload looks sane (has the three top keys)
+            if isinstance(data, dict) and {"stop_a", "stop_b", "stop_c"} <= set(data.keys()):
+                CACHE[key] = {"data": data, "ts": time.time()}
+            data["_stale"] = False
+            data["_age_sec"] = 0
+            return data, False
+        except Exception as e:
+            err = e
+            if attempt < retries:
+                time.sleep(backoff_sec)
+
+    # Live fetch failed; use cache if available
+    if last:
+        age = int(time.time() - last["ts"])
+        data = dict(last["data"])  # shallow copy
+        data["_stale"] = True
+        data["_age_sec"] = age
+        return data, True
+
+    # No cache either → return empty placeholder
+    print("GAS fetch failed, no cache:", repr(err))
+    data = _empty_payload(a, b, c)
+    data["_stale"] = True
+    data["_age_sec"] = None
+    return data, True
 
 # ---------- Canvas & layout --------------------------------------------------
 W, H = 800, 480
@@ -54,12 +91,12 @@ STAMP_PAD_TOP = 20
 # ---------- Visual tuning ----------------------------------------------------
 # Smaller stop names, slightly larger routes, biggest timings. Extra breathing space.
 STAMP_SIZE = 12     # "Updated HH:MM"
-NAME_SIZE  = 22     # stop names (smaller)
-SVC_SIZE   = 28     # route numbers (medium)
-TIME_SIZE  = 32     # timings (largest)
+NAME_SIZE  = 20     # stop names (even smaller)
+SVC_SIZE   = 30     # route numbers
+TIME_SIZE  = 34     # timings (largest)
 
 COL_GAP       = 32  # gap between A and B columns
-SVC_COL       = 120 # route number column width (smaller -> more room for times)
+SVC_COL       = 120 # route number column width
 LINE_GAP      = 10  # gap between the 3 vertical time lines
 EXTRA_ROW_PAD = 12  # extra space under each route row
 TITLE_GAP     = 8   # gap under stop titles
@@ -67,8 +104,6 @@ TITLE_GAP     = 8   # gap under stop titles
 # ---------- Fonts (local Inter variable; fallback to default) ----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INTER_VAR_PATH = os.path.join(BASE_DIR, "fonts", "Inter-VariableFont_opsz,wght.ttf")
-# Inter-Italic available but unused:
-# INTER_VAR_ITALIC_PATH = os.path.join(BASE_DIR, "fonts", "Inter-Italic-VariableFont_opsz,wght.ttf")
 
 def _load_fonts():
     """Load Inter variable font locally. Fallback to Pillow default."""
@@ -123,12 +158,7 @@ def _draw_text(d, x, y, s, font, *, bold=False):
         d.text((x, y), s, 0, font=font)
 
 def _primary_name(name: str) -> str:
-    """
-    Return the name without any trailing ' ( ... )' part.
-    Examples:
-      'Opp Blk 123 (Main Rd)' -> 'Opp Blk 123'
-      'Dhoby Ghaut Stn'       -> 'Dhoby Ghaut Stn'
-    """
+    """Return name without trailing ' ( ... )' part."""
     if not name:
         return ""
     i = name.find(" (")
@@ -142,13 +172,10 @@ def _min_str(v):
         s = str(v).strip()
         if s == "" or s.lower() in ("", "na", "none"):
             return "—"
-        # some feeds return "Arr" / "ARR" or "0"
         if s.lower().startswith("arr"):
             return "0m"
-        # keep only integer-ish part
-        # allow "5" or "5.0"
         n = int(float(s))
-        if n < 0:  # guard
+        if n < 0:
             return "—"
         return f"{n}m"
     except Exception:
@@ -161,7 +188,7 @@ def draw_image(data):
       - A (left) and B (right) on top (≤3 routes each)
       - C full-width under the taller of A/B (2 routes side-by-side)
       - BIG timings, smaller names/routes, extra breathing space
-      - SGT 'Updated HH:MM' top-right
+      - SGT 'Updated HH:MM' top-right (+ ' (stale)' when using cache)
       - Shows ONLY minutes (no clock times)
       - Auto-scales down slightly if content would overflow
     """
@@ -199,7 +226,7 @@ def draw_image(data):
         A_h = measure_block(data.get("stop_a"), col_w)
         B_h = measure_block(data.get("stop_b"), col_w)
 
-        C_y = grid_y + max(A_h, B_h) + 12
+        C_y = PAD_T + STAMP_PAD_TOP + _line_h(d, f_stamp) + max(A_h, B_h) + 12
         C_w = W - PAD_L - PAD_R
 
         raw_c = (data.get("stop_c") or {}).get("name") or (data.get("stop_c") or {}).get("code") or ""
@@ -215,21 +242,20 @@ def draw_image(data):
         c_body_h  = row_adv if len(servicesC) >= 1 else 0
 
         total_bottom = C_y + c_title_h + c_body_h + PAD_B
-        return total_bottom, grid_y, col_w, C_y, C_w
+        return total_bottom
 
     # Try up to 4 shrink passes if needed
     for _ in range(4):
         f_name, f_svc, f_time, f_stamp, _ok = _load_fonts_sizes(name_sz, svc_sz, time_sz, stamp_sz)
-        total_bottom, grid_y, col_w, C_y, C_w = measure_total(f_name, f_svc, f_time, f_stamp, line_gap)
+        total_bottom = measure_total(f_name, f_svc, f_time, f_stamp, line_gap)
         if total_bottom <= H:
             break
-        avail = H - grid_y - PAD_B
-        need  = total_bottom - grid_y - PAD_B
-        scale = max(0.72, min(0.96, avail / max(need, 1)))
-        name_sz  = max(20, int(name_sz  * scale))
+        # shrink proportionally
+        scale = 0.92
+        name_sz  = max(18, int(name_sz  * scale))
         svc_sz   = max(22, int(svc_sz   * scale))
-        time_sz  = max(22, int(time_sz  * scale))   # keep timings larger than titles
-        stamp_sz = max(11, int(stamp_sz * scale))
+        time_sz  = max(22, int(time_sz  * scale))  # keep timings larger
+        stamp_sz = max(10, int(stamp_sz * scale))
         line_gap = max(6,  int(line_gap * scale))
 
     # Final draw with settled sizes
@@ -239,6 +265,8 @@ def draw_image(data):
     sgt = timezone(timedelta(hours=8))
     now_hm = datetime.now(sgt).strftime("%H:%M")
     stamp  = f"Updated {now_hm}"
+    if data.get("_stale"):
+        stamp += " (stale)"
     stamp_h = _line_h(d, f_stamp)
     tx = W - PAD_R - d.textlength(stamp, font=f_stamp)
     ty = PAD_T
@@ -352,7 +380,8 @@ def debug():
     a = (request.args.get("stop_a") or DEFAULT_A).strip()
     b = (request.args.get("stop_b") or DEFAULT_B).strip()
     c = (request.args.get("stop_c") or DEFAULT_C).strip()
-    return jsonify(fetch_bus(a, b, c, timeout_sec=8))
+    data, stale = fetch_bus(a, b, c, timeout_sec=6, retries=1)
+    return jsonify(data)
 
 # The 800x480 1-bit PNG image
 @app.get("/image.png")
@@ -360,7 +389,7 @@ def image_png():
     a = (request.args.get("stop_a") or DEFAULT_A).strip()
     b = (request.args.get("stop_b") or DEFAULT_B).strip()
     c = (request.args.get("stop_c") or DEFAULT_C).strip()
-    data = fetch_bus(a, b, c, timeout_sec=8)  # image can wait a little longer
+    data, stale = fetch_bus(a, b, c, timeout_sec=6, retries=1)
     png = draw_image(data)
     return send_file(png, mimetype="image/png")
 
