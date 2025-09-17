@@ -1,7 +1,63 @@
-# EDIT ME (1): your Google Apps Script deployment ID that returns your bus JSON
-GAS_DEPLOYMENT_ID = "AKfycbyJwiSxqW-AjsTxrqNFCZA_0tp8bwqAjRDOXai0a9fcAiEhi3QV8_LGbQRtR_X7QYsR"
-# EDIT ME (2): default bus stop codes (you can override via query string)
+# ==== CONFIG (you can paste either the deployment ID or the full /exec URL) ====
+GAS_DEPLOYMENT = "https://script.google.com/macros/s/AKfycbyJwiSxqW-AjsTxrqNFCZA_0tp8bwqAjRDOXai0a9fcAiEhi3QV8_LGbQRtR_X7QYsR/exec"
 DEFAULT_A, DEFAULT_B, DEFAULT_C = "45379", "45489", "45371"
+# ==============================================================================
+
+from flask import Flask, request, jsonify, send_file
+import io, time, requests
+from PIL import Image, ImageDraw, ImageFont
+
+app = Flask(__name__)
+
+def gas_base_url():
+    # If you pasted the full URL, use it; otherwise compose from ID
+    if GAS_DEPLOYMENT.startswith("http"):
+        return GAS_DEPLOYMENT.split("?")[0]  # strip any old query
+    return f"https://script.google.com/macros/s/{GAS_DEPLOYMENT}/exec"
+
+def fetch_bus(stopa, stopb, stopc, timeout_sec=5):
+    try:
+        r = requests.get(
+            gas_base_url(),
+            params={"stop_a": stopa, "stop_b": stopb, "stop_c": stopc},
+            timeout=timeout_sec,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        # helpful to see in Render logs
+        print("GAS fetch failed:", repr(e))
+        return {
+            "stop_a": {"name": f"{stopa}", "code": stopa, "services": []},
+            "stop_b": {"name": f"{stopb}", "code": stopb, "services": []},
+            "stop_c": {"name": f"{stopc}", "code": stopc, "services": []},
+        }
+
+@app.get("/")
+def home():
+    return "OK", 200
+
+@app.get("/healthz")
+def healthz():
+    return jsonify(status="ok"), 200
+
+# NEW: raw probe so we can see what's really coming back from GAS
+@app.get("/probe")
+def probe():
+    a = (request.args.get("stop_a") or DEFAULT_A).strip()
+    b = (request.args.get("stop_b") or DEFAULT_B).strip()
+    c = (request.args.get("stop_c") or DEFAULT_C).strip()
+    try:
+        r = requests.get(gas_base_url(), params={"stop_a": a, "stop_b": b, "stop_c": c}, timeout=8)
+        body = r.text[:500]
+        return jsonify({
+            "status": r.status_code,
+            "content_type": r.headers.get("content-type"),
+            "sample": body,
+            "url": r.url
+        }), 200
+    except Exception as e:
+        return jsonify({"error": repr(e)}), 500
 
 # ----------------- no edits below this line -----------------
 from flask import Flask, request, jsonify, send_file
@@ -18,7 +74,7 @@ def debug():
     a = (request.args.get("stop_a") or DEFAULT_A).strip()
     b = (request.args.get("stop_b") or DEFAULT_B).strip()
     c = (request.args.get("stop_c") or DEFAULT_C).strip()
-    return jsonify(fetch_bus(a, b, c))
+    return jsonify(fetch_bus(a, b, c, timeout_sec=8))
 
 def fetch_bus(stopa, stopb, stopc):
     try:
@@ -87,10 +143,8 @@ def image_png():
     a = (request.args.get("stop_a") or DEFAULT_A).strip()
     b = (request.args.get("stop_b") or DEFAULT_B).strip()
     c = (request.args.get("stop_c") or DEFAULT_C).strip()
-    data = fetch_bus(a, b, c)
-    png = draw_image(data)
-    return send_file(png, mimetype="image/png")
-
+    data = fetch_bus(a, b, c, timeout_sec=8)
+    
 @app.get("/redirect")
 def redirect_json():
     # Fast JSON that tells TRMNL what image to fetch next and when to wake again
